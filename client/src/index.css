@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 antialiased;
+  }
+}
+
+@layer components {
+  .dropzone {
+    @apply border-2 border-dashed border-gray-600 rounded-xl p-12 text-center
+           transition-all duration-200 ease-in-out cursor-pointer
+           hover:border-blue-500 hover:bg-blue-500/5;
+  }
+  
+  .dropzone-active {
+    @apply border-blue-400 bg-blue-500/10 scale-[1.02];
+  }
+
+  .progress-bar {
+    @apply h-3 rounded-full bg-gray-800 overflow-hidden;
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400
+           transition-all duration-300 ease-out;
+  }
+}
+
+@layer utilities {
+  .animate-pulse-slow {
+    animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}

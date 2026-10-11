@@ -144,10 +144,6 @@ export function useFileTransfer(webrtc) {
           }
           receivedChunksRef.current[index] = chunkData;
 
-          // ⚠️ TEMPORARY TEST: corrupt chunk 5 to verify hash-mismatch detection
-          // DELETE THIS LINE after testing!
-          if (index === 5) receivedChunksRef.current[5] = new ArrayBuffer(chunkData.byteLength);
-
           setBytesTransferred(prev => prev + chunkData.byteLength);
 
           // Bug 6 fix: O(1) progress from counter ref
@@ -167,15 +163,6 @@ export function useFileTransfer(webrtc) {
             return;
           }
 
-          // ────────────────────────────────────────────────────────
-          // Bug 3 fix: guard against incomplete transfers.
-          // On a reliable, ordered DataChannel, chunk drops shouldn't
-          // happen — but an abrupt disconnect can leave us with a
-          // partial chunk array. Without this guard, undefined slots
-          // silently coerce to "undefined" strings in the Blob,
-          // producing a confusing "hash mismatch" instead of a clear
-          // "incomplete transfer" message.
-          // ────────────────────────────────────────────────────────
           if (receivedCountRef.current !== meta.totalChunks) {
             setStatus('error');
             setError(

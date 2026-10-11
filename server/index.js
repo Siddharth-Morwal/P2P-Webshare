@@ -18,7 +18,12 @@ const io = new Server(httpServer, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  // Hardening: cap message size at 64KB. Signaling payloads (SDP, ICE)
+  // are typically 2-5KB. This prevents any possibility of file data
+  // being relayed through the signaling server, even via a buggy or
+  // malicious client. File data flows only over WebRTC DataChannel.
+  maxHttpBufferSize: 64 * 1024,
 });
 
 app.get('/health', (req, res) => {

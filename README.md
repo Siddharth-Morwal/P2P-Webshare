@@ -28,9 +28,11 @@ Drop a file, share the link, and transfer directly — peer-to-peer. The signali
 ### Key Design Decisions
 
 - **Raw `RTCPeerConnection`** — no wrapper libraries. Direct access to `bufferedAmount` for backpressure control during chunked transfers.
-- **Wire protocol** — control messages (metadata, complete, error) sent as JSON strings; chunk data sent as `ArrayBuffer` with 4-byte index header. Distinguished by `typeof` check on the receiver.
+- **Wire protocol** — control messages (metadata, complete, error) sent as JSON strings; chunk data sent as `ArrayBuffer` with a 4-byte LE uint32 index header. Receiver distinguishes them via `typeof` check (string vs ArrayBuffer).
 - **SHA-256 integrity** — whole-file hash computed before transfer, verified on the receiver after reassembly via Web Crypto API (`SubtleCrypto`).
-- **64 KB chunks** — within the safe DataChannel message size ceiling, gives responsive progress updates.
+- **64 KB chunks** — within the safe DataChannel message size ceiling (~256KB varies by browser), gives responsive progress updates.
+- **Backpressure control** — sender pauses at 128KB `bufferedAmount` threshold, resumes on `bufferedamountlow` event (64KB). Rejects cleanly if the DataChannel closes or errors during the wait (no hanging promises).
+- **Server hardening** — Socket.io `maxHttpBufferSize` capped at 64KB. Signaling payloads (SDP ~2-5KB, ICE ~200B) never exceed 20KB. This prevents relay abuse even via a malicious client.
 
 ---
 
@@ -144,19 +146,68 @@ npm start
 1. Open the shared link (`/room/:roomId`)
 2. WebRTC connection establishes automatically
 3. File chunks arrive, progress is tracked in real-time
-4. On completion, whole-file SHA-256 is verified
+4. On completion, whole-file SHA-256 is verified against the sender's hash
 5. File auto-downloads to the browser
+
+### Error Handling
+- **Peer disconnect mid-transfer**: UI shows "Connection Lost" instead of hanging or freezing
+- **Incomplete transfer**: If not all chunks arrived, a clear "Incomplete transfer — received X of Y chunks" message appears (distinct from hash mismatch)
+- **Hash mismatch**: If all chunks arrived but data is corrupted, "File integrity check failed — SHA-256 hash mismatch" is shown
+- **Room not found**: Receiver sees "Room Not Found" with an explanation and a back-to-home button
+- **Room full**: Rejected with an error if a third peer tries to join
 
 ---
 
 ## Browser Compatibility
 
-| Browser | Status |
-|---|---|
-| Chrome / Edge (Chromium) | ✅ Fully supported |
-| Firefox | ✅ Fully supported |
-| Safari | ⚠️ WebRTC support available but may have quirks with DataChannel reliability |
-| Mobile Chrome/Firefox | ✅ Should work on same-network transfers |
+| Browser | Status | Tested |
+|---|---|---|
+| Chrome / Edge (Chromium) | ✅ Fully supported | ✅ Verified |
+| Brave | ✅ Fully supported | ✅ Verified (sender) |
+| Firefox | ✅ Fully supported | — |
+| Safari | ⚠️ WebRTC support available but may have quirks with DataChannel reliability | — |
+| Mobile Chrome/Firefox | ✅ Should work on same-network transfers | — |
+
+---
+
+## Test Results
+
+End-to-end functional testing has been completed for the following scenarios:
+
+| Test | Result | Details |
+|---|---|---|
+| Same-machine two-tab transfer | ✅ Pass | PDF file (791KB, 13 chunks), SHA-256 hash verified ✓, auto-download works |
+| Sender-tab-kill mid-transfer | ✅ Pass | Receiver shows "Connection Lost", no crash/freeze |
+| Receiver-tab-kill mid-transfer | ✅ Pass | Sender shows "Connection Lost", no crash/freeze |
+| Oversized file (>50MB) rejection | ✅ Pass | "File is too large. Max size is 50 MB." |
+| Invalid room ID | ✅ Pass | "Room not found" error surfaced correctly |
+| Cross-browser (Brave → Edge) | ✅ Pass | Transfer completes across different Chromium browsers |
+| Network tab audit | ✅ Pass | Code audit confirmed zero file bytes in signaling traffic; `maxHttpBufferSize` hardening applied |
+| Cross-network (STUN) | ⏳ Deferred | Requires public deployment; not testable on localhost |
+
+---
+
+## Signaling Server Audit
+
+The signaling server has been audited to confirm it is a **matchmaker, not a courier**:
+
+- **6 socket event handlers**: `create-room`, `join-room`, `offer`, `answer`, `ice-candidate`, `disconnect`
+- Each handler only relays signaling data (room IDs, SDP objects, ICE candidates)
+- **Zero file data paths**: `useFileTransfer.js` has no references to `socket` or `emit` — file data flows exclusively through `dc.send()` on the `RTCDataChannel`
+- **Server logs**: Only socket IDs, room IDs, and connection events. Never logs payload content.
+- **Message size cap**: Socket.io `maxHttpBufferSize` set to 64KB (signaling payloads are typically 2-5KB)
+
+To verify yourself:
+1. Open browser DevTools → Network tab → WS filter
+2. Inspect Socket.io frames during a transfer
+3. You'll see only: `create-room`, `room-created`, `join-room`, `room-joined`, `offer`, `answer`, `ice-candidate`, `peer-joined`, `peer-left`
+4. **Zero file bytes** appear in the WebSocket traffic
+
+The `/health` endpoint confirms room count only:
+```bash
+curl http://localhost:3001/health
+# {"status":"ok","rooms":0}
+```
 
 ---
 
@@ -188,7 +239,7 @@ const ICE_SERVERS = [
 - **File size**: 50 MB max for MVP (in-memory buffering on receiver side)
 - **Peers per room**: 2 (1 sender + 1 receiver)
 - **No resume**: If the connection drops, the transfer must restart from scratch
-- **No encryption**: File data is unencrypted over the DataChannel (WebRTC's DTLS provides transport-layer encryption, but no application-layer zero-knowledge encryption)
+- **No application-layer encryption**: File data is unencrypted at the application layer. WebRTC's DTLS provides transport-layer encryption, but there is no zero-knowledge encryption where only the sender and receiver can read the data.
 
 ---
 
@@ -196,27 +247,10 @@ const ICE_SERVERS = [
 
 | Priority | Feature | Description |
 |---|---|---|
-| 🔴 High | Zero-knowledge encryption (S3) | AES-GCM via Web Crypto, key in URL fragment (`#key=...`) — never hits server |
-| 🟡 Medium | Auto-resume (S4) | Track last verified chunk, resume from `lastIndex + 1` on reconnect |
-| 🟡 Medium | Large file support (S2) | Streams API + OPFS/IndexedDB for 500MB+ files |
-| 🟢 Low | Multi-peer mesh (S1) | Parallel chunk download from 2+ peers |
-
----
-
-## Verifying the Architecture
-
-To confirm the signaling server never sees file data:
-
-1. Open browser DevTools → Network tab → WS filter
-2. Inspect Socket.io frames during a transfer
-3. You'll see only: `create-room`, `join-room`, `offer`, `answer`, `ice-candidate`, `peer-joined`, `peer-left`
-4. **Zero file bytes** appear in the WebSocket traffic
-
-The `/health` endpoint on the server confirms room count only:
-```bash
-curl http://localhost:3001/health
-# {"status":"ok","rooms":0}
-```
+| 🔴 High | Zero-knowledge encryption (S3) | AES-GCM via Web Crypto, key in URL fragment (`#key=...`) — never hits server. Crypto.js stubs already in place. |
+| 🟡 Medium | Auto-resume (S4) | Track last verified chunk index, resume from `lastIndex + 1` on reconnect to same room |
+| 🟡 Medium | Large file support (S2) | Streams API + OPFS/IndexedDB for 500MB+ files without blowing browser memory |
+| 🟢 Low | Multi-peer mesh (S1) | Parallel chunk download from 2+ peers with chunk-range negotiation |
 
 ---
 
